@@ -76,6 +76,11 @@ func main() {
 					return err
 				}
 				for _, dbFilename := range weChatInfo.DBFilenames {
+					// xInfo.db 无需解密, 跳过
+					if filepath.Base(dbFilename) == "xInfo.db" {
+						continue
+					}
+
 					if err := core.DecryptDB(weChatInfo.Key, dbFilename, filepath.Join(userOutputDir, filepath.Base(dbFilename))); err != nil {
 						log.Warn("decrypt db failed", "filename", dbFilename, "error", err)
 					}
