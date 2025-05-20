@@ -1,14 +1,15 @@
 package core
 
 import (
+	"bytes"
 	"debug/pe"
+	"encoding/binary"
 	"fmt"
-	"regexp"
-	"slices"
 	"strings"
 	"syscall"
 	"unsafe"
 
+	"github.com/charmbracelet/log"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/windows"
 )
@@ -26,7 +27,7 @@ func GetPEBits(filename string) (int, error) {
 	case *pe.OptionalHeader64:
 		return 64, nil
 	default:
-		return 0, errors.Errorf("未知的 Optional Header 类型: %T", oh)
+		return 0, errors.Errorf("unknown Optional Header type: %T", oh)
 	}
 }
 
@@ -73,15 +74,19 @@ func GetProcessList() ([]*ProcessEntry, error) {
 	return processList, nil
 }
 
-func GetProcessExePath(processID uint32) (string, error) {
+func GetProcessExePathWithPID(processID uint32) (string, error) {
 	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION, false, processID)
 	if err != nil {
 		return "", errors.WithStack(err)
 	}
 	defer windows.CloseHandle(handle) //nolint
 
+	return GetProcessExePath(handle)
+}
+
+func GetProcessExePath(process windows.Handle) (string, error) {
 	buf := make([]uint16, windows.MAX_PATH)
-	if err := windows.GetModuleFileNameEx(handle, 0, &buf[0], uint32(len(buf))); err != nil {
+	if err := windows.GetModuleFileNameEx(process, 0, &buf[0], uint32(len(buf))); err != nil {
 		return "", errors.WithStack(err)
 	}
 
@@ -164,7 +169,9 @@ func ReadStringFromMemory(process windows.Handle, address uintptr, size int) (st
 	buf := make([]byte, size)
 	var bytesRead uintptr
 	if err := windows.ReadProcessMemory(process, address, &buf[0], uintptr(size), &bytesRead); err != nil {
-		return "", errors.WithStack(err)
+		if err != windows.ERROR_PARTIAL_COPY {
+			return "", errors.WithStack(err)
+		}
 	}
 	var builder strings.Builder
 	for i := 0; i < int(bytesRead); i++ {
@@ -176,17 +183,14 @@ func ReadStringFromMemory(process windows.Handle, address uintptr, size int) (st
 	return builder.String(), nil
 }
 
-func SearchInMemory(process windows.Handle, expr string, limit int) ([]uintptr, error) {
-	allowedProtections := []uint32{
-		windows.PAGE_EXECUTE,
-		windows.PAGE_EXECUTE_READ,
-		windows.PAGE_EXECUTE_READWRITE,
-		windows.PAGE_READWRITE,
-		windows.PAGE_READONLY,
-	}
-	re, err := regexp.Compile(regexp.QuoteMeta(expr))
+func SearchInMemory(process windows.Handle, target any, limit int) ([]uintptr, error) {
+	execPath, err := GetProcessExePath(process)
 	if err != nil {
-		return nil, errors.WithStack(err)
+		return nil, err
+	}
+	execBits, err := GetPEBits(execPath)
+	if err != nil {
+		return nil, err
 	}
 
 	var res []uintptr
@@ -196,16 +200,23 @@ func SearchInMemory(process windows.Handle, expr string, limit int) ([]uintptr, 
 		if err := windows.VirtualQueryEx(process, addr, &mbi, unsafe.Sizeof(mbi)); err != nil {
 			break
 		}
-
-		if mbi.State == windows.MEM_COMMIT && slices.Contains(allowedProtections, mbi.Protect) {
-			regionBytes := make([]byte, mbi.RegionSize)
+		// TODO 不确定是否有问题，比如增加判断 RegionSize 不能超过 2G?
+		if mbi.State == windows.MEM_COMMIT && mbi.Protect&(windows.PAGE_READWRITE|windows.PAGE_READONLY) != 0 {
+			buffer := make([]byte, mbi.RegionSize)
 			var bytesRead uintptr
-			if err := windows.ReadProcessMemory(process, mbi.BaseAddress, &regionBytes[0], uintptr(mbi.RegionSize), &bytesRead); err != nil {
-				return nil, errors.WithStack(err)
+			if err := windows.ReadProcessMemory(process, mbi.BaseAddress, &buffer[0], uintptr(mbi.RegionSize), &bytesRead); err != nil {
+				if err != windows.ERROR_PARTIAL_COPY {
+					return nil, errors.WithStack(err)
+				} else {
+					log.Debugf("BaseAddress: 0x%X, RegionSize: %d", mbi.BaseAddress, mbi.RegionSize) // TODO 这种情况暂时不知道如何处理，不影响使用
+				}
 			}
-			matches := re.FindAllIndex(regionBytes, -1)
-			for _, match := range matches {
-				res = append(res, mbi.BaseAddress+uintptr(match[0]))
+			results, err := find(execBits, buffer[:bytesRead], target)
+			if err != nil {
+				return nil, err
+			}
+			for _, v := range results {
+				res = append(res, mbi.BaseAddress+v)
 			}
 		}
 		if len(res) >= limit {
@@ -215,4 +226,54 @@ func SearchInMemory(process windows.Handle, expr string, limit int) ([]uintptr, 
 	}
 
 	return res, nil
+}
+
+// find 在 windows 内存 buffer 中寻找匹配所有 target 值的偏移量。根据 target 类型有不同实现
+func find(bits int, buffer []byte, target any) ([]uintptr, error) {
+	var pattern []byte
+
+	switch v := target.(type) {
+	case int:
+		switch bits {
+		case 64:
+			pattern = make([]byte, 8)
+			binary.LittleEndian.PutUint64(pattern, uint64(v))
+		case 32:
+			pattern = make([]byte, 4)
+			binary.LittleEndian.PutUint32(pattern, uint32(v))
+		}
+	case int32:
+		pattern = make([]byte, 4)
+		binary.LittleEndian.PutUint32(pattern, uint32(v))
+	case int64:
+		pattern = make([]byte, 8)
+		binary.LittleEndian.PutUint64(pattern, uint64(v))
+	case string:
+		pattern = []byte(v)
+	case []byte:
+		pattern = v
+	default:
+		return nil, errors.Errorf("unsupported type: %T", target)
+	}
+
+	patternLen := len(pattern)
+	if patternLen == 0 {
+		return nil, errors.Errorf("pattern is empty")
+	}
+
+	var results []uintptr
+
+	offset := 0
+	for {
+		idx := bytes.Index(buffer[offset:], pattern)
+		if idx == -1 {
+			break // 没有找到更多匹配项
+		}
+		// 将相对索引转换为绝对偏移量
+		results = append(results, uintptr(offset+idx))
+		// 更新搜索的起始位置，避免重复匹配
+		offset += idx + patternLen
+	}
+
+	return results, nil
 }

@@ -160,7 +160,7 @@ func ReadKeyFromMemory(process windows.Handle, address uintptr, addressLen int) 
 	case 8:
 		keyAddress = binary.LittleEndian.Uint64(array)
 	default:
-		return "", fmt.Errorf("unsupported address length: %d", addressLen)
+		return "", errors.Errorf("unsupported address length: %d", addressLen)
 	}
 
 	keyBuf := make([]byte, KeySize)
@@ -169,6 +169,34 @@ func ReadKeyFromMemory(process windows.Handle, address uintptr, addressLen int) 
 	}
 
 	return fmt.Sprintf("%x", keyBuf), nil
+}
+
+func FindInMemory(processID uint32, target any, limit int) ([]uintptr, error) {
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ, false, processID)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	defer windows.CloseHandle(handle) //nolint
+
+	memInfoList, err := GetMemoryInformation(handle)
+	if err != nil {
+		log.Fatalf("%+v\n", err)
+	}
+	memInfo, ok := lo.Find(memInfoList, func(memInfo *MemoryInformation) bool {
+		return strings.Contains(memInfo.Filename, "WeChatWin.dll")
+	})
+	if !ok {
+		return nil, errors.New("WeChatWin.dll not found")
+	}
+
+	addrs, err := SearchInMemory(handle, target, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	return lo.Map(addrs, func(item uintptr, _ int) uintptr {
+		return item - memInfo.BaseAddress
+	}), nil
 }
 
 func ReadWXIDFromMemory(handle windows.Handle) (string, error) {
