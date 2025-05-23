@@ -4,7 +4,49 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"golang.org/x/sys/windows"
 )
+
+func TestGetBits(t *testing.T) {
+	processID, err := GetProcessID("WeChat.exe")
+	if err != nil {
+		t.Fatalf("GetProcessID failed: %v", err)
+	}
+
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION, false, processID)
+	if err != nil {
+		t.Fatalf("OpenProcess failed: %+v", err)
+	}
+	defer windows.CloseHandle(handle) //nolint
+
+	bits, err := GetBits(handle)
+	if err != nil {
+		t.Fatalf("GetBits failed: %v", err)
+	}
+	t.Log(bits)
+}
+
+func TestScanMemory(t *testing.T) {
+	processID, err := GetProcessID("WeChat.exe")
+	if err != nil {
+		t.Fatalf("GetProcessID failed: %+v", err)
+	}
+
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ, false, processID)
+	if err != nil {
+		t.Fatalf("OpenProcess failed: %+v", err)
+	}
+	defer windows.CloseHandle(handle) //nolint
+
+	addrs, err := ScanMemoryWithOptions(handle, "saltfishpr", ScanMemoryOptions{
+		ModuleName: "WeChatWin.dll",
+		Limit:      100,
+	})
+	if err != nil {
+		t.Fatalf("ScanMemory failed: %+v", err)
+	}
+	t.Logf("Found %d addresses", len(addrs))
+}
 
 func Test_find(t *testing.T) {
 	type args struct {

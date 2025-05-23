@@ -15,12 +15,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/charmbracelet/log"
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
 	"golang.org/x/crypto/pbkdf2"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
+
+	"github.com/saltfishpr/wxdump/internal/core/v2"
 )
 
 const KeySize = 32
@@ -72,45 +73,51 @@ type WeChatInfo struct {
 	DBFilenames []string
 }
 
-func GetWeChatInfo(processID uint32, addressLen int, offset *WeChatOffset) (*WeChatInfo, error) {
-	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ, false, processID)
+func GetModuleByName(process windows.Handle, moduleName string) (windows.Handle, error) {
+	hMods, err := core.EnumProcessModules(process)
+	if err != nil {
+		return 0, err
+	}
+	for _, hMod := range hMods {
+		name, err := core.GetModuleFileNameEx(process, hMod)
+		if err != nil {
+			return 0, err
+		}
+		if strings.Contains(name, moduleName) {
+			return hMod, nil
+		}
+	}
+	return 0, errors.Errorf("module %s not found", moduleName)
+}
+
+func GetWeChatInfo(process windows.Handle, offset *WeChatOffset) (*WeChatInfo, error) {
+	hMod, err := GetModuleByName(process, "WeChatWin.dll")
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	defer windows.CloseHandle(handle) //nolint
+	baseAddress := uintptr(hMod)
 
-	memInfoList, err := GetMemoryInformation(handle)
-	if err != nil {
-		log.Fatalf("%+v\n", err)
-	}
-	memInfo, ok := lo.Find(memInfoList, func(memInfo *MemoryInformation) bool {
-		return strings.Contains(memInfo.Filename, "WeChatWin.dll")
-	})
-	if !ok {
-		return nil, errors.New("WeChatWin.dll not found")
-	}
-
-	nickname, err := ReadStringFromMemory(handle, memInfo.BaseAddress+uintptr(offset.Nickname), 64)
+	nickname, err := ReadStringFromMemory(process, baseAddress+uintptr(offset.Nickname), 64)
 	if err != nil {
 		return nil, errors.Wrapf(err, "read nickname failed")
 	}
 
-	account, err := ReadStringFromMemory(handle, memInfo.BaseAddress+uintptr(offset.Account), 32)
+	account, err := ReadStringFromMemory(process, baseAddress+uintptr(offset.Account), 32)
 	if err != nil {
 		return nil, errors.Wrapf(err, "read account failed")
 	}
 
-	phone, err := ReadStringFromMemory(handle, memInfo.BaseAddress+uintptr(offset.Phone), 64)
+	phone, err := ReadStringFromMemory(process, baseAddress+uintptr(offset.Phone), 64)
 	if err != nil {
 		return nil, errors.Wrapf(err, "read phone failed")
 	}
 
-	key, err := ReadKeyFromMemory(handle, memInfo.BaseAddress+uintptr(offset.Key), addressLen)
+	key, err := ReadKeyFromMemory(process, baseAddress+uintptr(offset.Key))
 	if err != nil {
 		return nil, errors.Wrapf(err, "read key failed")
 	}
 
-	wxID, err := ReadWXIDFromMemory(handle)
+	wxID, err := ReadWXIDFromMemory(process)
 	if err != nil {
 		return nil, errors.Wrapf(err, "read wxID failed")
 	}
@@ -146,21 +153,26 @@ func GetWeChatInfo(processID uint32, addressLen int, offset *WeChatOffset) (*WeC
 	}, nil
 }
 
-func ReadKeyFromMemory(process windows.Handle, address uintptr, addressLen int) (string, error) {
-	array := make([]byte, addressLen)
+func ReadKeyFromMemory(process windows.Handle, address uintptr) (string, error) {
+	bits, err := core.GetBits(process)
+	if err != nil {
+		return "", err
+	}
+
+	array := make([]byte, bits/8)
 	var bytesRead uintptr
-	if err := windows.ReadProcessMemory(process, address, &array[0], uintptr(addressLen), &bytesRead); err != nil {
+	if err := windows.ReadProcessMemory(process, address, &array[0], uintptr(bits/8), &bytesRead); err != nil {
 		return "", errors.WithStack(err)
 	}
 
 	var keyAddress uint64
-	switch addressLen {
-	case 4:
+	switch bits {
+	case 32:
 		keyAddress = uint64(binary.LittleEndian.Uint32(array))
-	case 8:
+	case 64:
 		keyAddress = binary.LittleEndian.Uint64(array)
 	default:
-		return "", errors.Errorf("unsupported address length: %d", addressLen)
+		return "", errors.Errorf("unsupported bits: %d", bits)
 	}
 
 	keyBuf := make([]byte, KeySize)
@@ -171,42 +183,15 @@ func ReadKeyFromMemory(process windows.Handle, address uintptr, addressLen int) 
 	return fmt.Sprintf("%x", keyBuf), nil
 }
 
-func FindInMemory(processID uint32, target any, limit int) ([]uintptr, error) {
-	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ, false, processID)
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-	defer windows.CloseHandle(handle) //nolint
-
-	memInfoList, err := GetMemoryInformation(handle)
-	if err != nil {
-		log.Fatalf("%+v\n", err)
-	}
-	memInfo, ok := lo.Find(memInfoList, func(memInfo *MemoryInformation) bool {
-		return strings.Contains(memInfo.Filename, "WeChatWin.dll")
-	})
-	if !ok {
-		return nil, errors.New("WeChatWin.dll not found")
-	}
-
-	addrs, err := SearchInMemory(handle, target, limit)
-	if err != nil {
-		return nil, err
-	}
-
-	return lo.Map(addrs, func(item uintptr, _ int) uintptr {
-		return item - memInfo.BaseAddress
-	}), nil
-}
-
-func ReadWXIDFromMemory(handle windows.Handle) (string, error) {
-	addrs, err := SearchInMemory(handle, "\\Msg\\FTSContact", 100)
+func ReadWXIDFromMemory(process windows.Handle) (string, error) {
+	addrs, err := core.ScanMemory(process, "\\Msg\\FTSContact")
 	if err != nil {
 		return "", err
 	}
+
 	var ids []string
 	for _, addr := range addrs {
-		s, err := ReadStringFromMemory(handle, addr-30, 80)
+		s, err := ReadStringFromMemory(process, addr-30, 80)
 		if err != nil {
 			return "", err
 		}
