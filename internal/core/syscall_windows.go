@@ -196,9 +196,9 @@ func GetModuleInformation(process windows.Handle, module windows.Handle) (window
 	return modInfo, nil
 }
 
-func ReadMemory(process windows.Handle, address uintptr, buffer []byte) (uintptr, error) {
+func ReadMemory(process windows.Handle, address uintptr, buf []byte) (uintptr, error) {
 	var bytesRead uintptr
-	err := windows.ReadProcessMemory(process, address, &buffer[0], uintptr(len(buffer)), &bytesRead)
+	err := windows.ReadProcessMemory(process, address, &buf[0], uintptr(len(buf)), &bytesRead)
 	if err != nil {
 		if err == windows.ERROR_PARTIAL_COPY {
 			// 读取部分内存成功，返回已读取的字节数
@@ -211,11 +211,9 @@ func ReadMemory(process windows.Handle, address uintptr, buffer []byte) (uintptr
 
 func ReadStringFromMemory(process windows.Handle, address uintptr, size int) (string, error) {
 	buf := make([]byte, size)
-	var bytesRead uintptr
-	if err := windows.ReadProcessMemory(process, address, &buf[0], uintptr(size), &bytesRead); err != nil {
-		if err != windows.ERROR_PARTIAL_COPY {
-			return "", errors.WithStack(err)
-		}
+	bytesRead, err := ReadMemory(process, address, buf)
+	if err != nil {
+		return "", err
 	}
 
 	var builder strings.Builder
@@ -228,28 +226,53 @@ func ReadStringFromMemory(process windows.Handle, address uintptr, size int) (st
 	return builder.String(), nil
 }
 
+// ReadPointerFromMemory 读取内存中的指针值
+func ReadPointerFromMemory(process windows.Handle, address uintptr) (uintptr, error) {
+	bits, err := GetBits(process)
+	if err != nil {
+		return 0, err
+	}
+
+	switch bits {
+	case 32:
+		addr, err := ReadInt32FromMemory(process, address)
+		if err != nil {
+			return 0, err
+		}
+		return uintptr(addr), nil
+	case 64:
+		addr, err := ReadInt64FromMemory(process, address)
+		if err != nil {
+			return 0, err
+		}
+		return uintptr(addr), nil
+	default:
+		return 0, errors.Errorf("unsupported bits: %d", bits)
+	}
+}
+
 func ReadInt32FromMemory(process windows.Handle, address uintptr) (uint32, error) {
-	buffer := make([]byte, 4)
-	bytesRead, err := ReadMemory(process, address, buffer)
+	buf := make([]byte, 4)
+	bytesRead, err := ReadMemory(process, address, buf)
 	if err != nil {
 		return 0, err
 	}
 	if bytesRead != 4 {
 		return 0, errors.Errorf("read %d bytes, expected 4 bytes", bytesRead)
 	}
-	return binary.LittleEndian.Uint32(buffer), nil
+	return binary.LittleEndian.Uint32(buf), nil
 }
 
 func ReadInt64FromMemory(process windows.Handle, address uintptr) (uint64, error) {
-	buffer := make([]byte, 8)
-	bytesRead, err := ReadMemory(process, address, buffer)
+	buf := make([]byte, 8)
+	bytesRead, err := ReadMemory(process, address, buf)
 	if err != nil {
 		return 0, err
 	}
 	if bytesRead != 8 {
 		return 0, errors.Errorf("read %d bytes, expected 8 bytes", bytesRead)
 	}
-	return binary.LittleEndian.Uint64(buffer), nil
+	return binary.LittleEndian.Uint64(buf), nil
 }
 
 type ScanMemoryOptions struct {
@@ -340,15 +363,15 @@ func findInMemory(process windows.Handle, bits int, mbi windows.MemoryBasicInfor
 	if mbi.RegionSize >= 2*(1<<30) {
 		return nil, nil
 	}
-	buffer := make([]byte, mbi.RegionSize)
-	bytesRead, err := ReadMemory(process, mbi.BaseAddress, buffer)
+	buf := make([]byte, mbi.RegionSize)
+	bytesRead, err := ReadMemory(process, mbi.BaseAddress, buf)
 	if err != nil {
 		return nil, err
 	}
-	return find(bits, buffer[:bytesRead], target)
+	return find(bits, buf[:bytesRead], target)
 }
 
-func find(bits int, buffer []byte, target any) ([]uintptr, error) {
+func find(bits int, buf []byte, target any) ([]uintptr, error) {
 	var pattern []byte
 
 	switch v := target.(type) {
@@ -386,7 +409,7 @@ func find(bits int, buffer []byte, target any) ([]uintptr, error) {
 
 	offset := 0
 	for {
-		idx := bytes.Index(buffer[offset:], pattern)
+		idx := bytes.Index(buf[offset:], pattern)
 		if idx == -1 {
 			break // 没有找到更多匹配项
 		}

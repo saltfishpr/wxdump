@@ -60,13 +60,13 @@ func GetWeChatInfo(process windows.Handle, offset *WeChatOffset) (*WeChatInfo, e
 }
 
 func ReadKeyFromMemory(process windows.Handle, address uintptr) (string, error) {
-	keyAddress, err := ReadInt64FromMemory(process, address)
+	pointer, err := ReadPointerFromMemory(process, address)
 	if err != nil {
 		return "", errors.WithStack(err)
 	}
 
-	buffer := make([]byte, KeySize)
-	bytesRead, err := ReadMemory(process, uintptr(keyAddress), buffer)
+	buf := make([]byte, KeySize)
+	bytesRead, err := ReadMemory(process, pointer, buf)
 	if err != nil {
 		return "", err
 	}
@@ -74,7 +74,7 @@ func ReadKeyFromMemory(process windows.Handle, address uintptr) (string, error) 
 		return "", errors.New("read key failed")
 	}
 
-	return fmt.Sprintf("%x", buffer), nil
+	return fmt.Sprintf("%x", buf), nil
 }
 
 func ReadWXIDFromMemory(process windows.Handle) (string, error) {
