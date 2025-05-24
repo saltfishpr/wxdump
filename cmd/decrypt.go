@@ -4,6 +4,7 @@ Copyright © 2025 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -14,7 +15,6 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/saltfishpr/wxdump/internal/core"
-	corev2 "github.com/saltfishpr/wxdump/internal/core/v2"
 )
 
 // decryptCmd represents the decrypt command
@@ -27,11 +27,11 @@ var decryptCmd = &cobra.Command{
 			return errors.WithStack(err)
 		}
 
-		processList, err := corev2.GetProcessList()
+		processList, err := core.GetProcessList()
 		if err != nil {
 			return err
 		}
-		wechatProcessList := lo.Filter(processList, func(item *corev2.ProcessEntry, _ int) bool {
+		wechatProcessList := lo.Filter(processList, func(item *core.ProcessEntry, _ int) bool {
 			return item.ExeFile == "WeChat.exe"
 		})
 
@@ -62,7 +62,7 @@ func processDecrypt(processID uint32, offsets map[string]*core.WeChatOffset, out
 	}
 	defer windows.CloseHandle(handle) //nolint
 
-	execPath, err := corev2.GetModuleFileNameEx(handle, 0)
+	execPath, err := core.GetModuleFileNameEx(handle, 0)
 	if err != nil {
 		return err
 	}
@@ -86,17 +86,25 @@ func processDecrypt(processID uint32, offsets map[string]*core.WeChatOffset, out
 	if err := ensureDir(userOutputDir); err != nil {
 		return err
 	}
-	for _, dbFilename := range weChatInfo.DBFilenames {
-		// xInfo.db 无需解密, 跳过
-		if filepath.Base(dbFilename) == "xInfo.db" {
-			continue
-		}
 
-		if err := core.DecryptDB(weChatInfo.Key, dbFilename, filepath.Join(userOutputDir, filepath.Base(dbFilename))); err != nil {
-			log.Warn("decrypt db failed", "filename", dbFilename, "error", err)
+	return filepath.WalkDir(weChatInfo.WXDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-	}
-	return nil
+		if d.IsDir() {
+			return nil
+		}
+		if filepath.Ext(path) != ".db" {
+			return nil
+		}
+		if filepath.Base(path) == "xInfo.db" {
+			return nil // xInfo.db 不需要解密
+		}
+		if err := core.DecryptDB(weChatInfo.Key, path, filepath.Join(userOutputDir, filepath.Base(path))); err != nil {
+			log.Warn("decrypt db failed", "filename", path, "error", err)
+		}
+		return nil
+	})
 }
 
 func ensureDir(path string) error {

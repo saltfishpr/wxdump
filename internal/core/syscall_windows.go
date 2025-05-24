@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -85,6 +86,38 @@ func ExeFilename(handle windows.Handle) (string, error) {
 	return windows.UTF16ToString(buf), nil
 }
 
+func GetFileVersionInfo(filename string) (string, error) {
+	size, err := windows.GetFileVersionInfoSize(filename, nil)
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+
+	data := make([]byte, size)
+	err = windows.GetFileVersionInfo(filename, 0, size, unsafe.Pointer(&data[0]))
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+
+	var fixedInfo *windows.VS_FIXEDFILEINFO
+	var uLen uint32
+	if err := windows.VerQueryValue(unsafe.Pointer(&data[0]), "\\", unsafe.Pointer(&fixedInfo), &uLen); err != nil {
+		return "", errors.WithStack(err)
+	}
+
+	if fixedInfo.Signature != 0xFEEF04BD {
+		return "", errors.Errorf("invalid file signature: 0x%X", fixedInfo.Signature)
+	}
+
+	version := fmt.Sprintf("%d.%d.%d.%d",
+		(fixedInfo.FileVersionMS>>16)&0xffff,
+		fixedInfo.FileVersionMS&0xffff,
+		(fixedInfo.FileVersionLS>>16)&0xffff,
+		fixedInfo.FileVersionLS&0xffff,
+	)
+
+	return version, nil
+}
+
 func GetBits(process windows.Handle) (int, error) {
 	info := &systemInfo{}
 	if err := GetNativeSystemInfo(info); err != nil {
@@ -138,6 +171,23 @@ func GetModuleFileNameEx(process windows.Handle, module windows.Handle) (string,
 	return windows.UTF16ToString(modName[:]), nil
 }
 
+func GetModuleByName(process windows.Handle, moduleName string) (windows.Handle, error) {
+	hMods, err := EnumProcessModules(process)
+	if err != nil {
+		return 0, err
+	}
+	for _, hMod := range hMods {
+		name, err := GetModuleFileNameEx(process, hMod)
+		if err != nil {
+			return 0, err
+		}
+		if strings.Contains(name, moduleName) {
+			return hMod, nil
+		}
+	}
+	return 0, errors.Errorf("module %s not found", moduleName)
+}
+
 func GetModuleInformation(process windows.Handle, module windows.Handle) (windows.ModuleInfo, error) {
 	var modInfo windows.ModuleInfo
 	if err := windows.GetModuleInformation(process, module, &modInfo, uint32(unsafe.Sizeof(modInfo))); err != nil {
@@ -157,6 +207,49 @@ func ReadMemory(process windows.Handle, address uintptr, buffer []byte) (uintptr
 		return 0, errors.WithStack(err)
 	}
 	return bytesRead, nil
+}
+
+func ReadStringFromMemory(process windows.Handle, address uintptr, size int) (string, error) {
+	buf := make([]byte, size)
+	var bytesRead uintptr
+	if err := windows.ReadProcessMemory(process, address, &buf[0], uintptr(size), &bytesRead); err != nil {
+		if err != windows.ERROR_PARTIAL_COPY {
+			return "", errors.WithStack(err)
+		}
+	}
+
+	var builder strings.Builder
+	for i := 0; i < int(bytesRead); i++ {
+		if buf[i] == 0 {
+			break
+		}
+		builder.WriteByte(buf[i])
+	}
+	return builder.String(), nil
+}
+
+func ReadInt32FromMemory(process windows.Handle, address uintptr) (uint32, error) {
+	buffer := make([]byte, 4)
+	bytesRead, err := ReadMemory(process, address, buffer)
+	if err != nil {
+		return 0, err
+	}
+	if bytesRead != 4 {
+		return 0, errors.Errorf("read %d bytes, expected 4 bytes", bytesRead)
+	}
+	return binary.LittleEndian.Uint32(buffer), nil
+}
+
+func ReadInt64FromMemory(process windows.Handle, address uintptr) (uint64, error) {
+	buffer := make([]byte, 8)
+	bytesRead, err := ReadMemory(process, address, buffer)
+	if err != nil {
+		return 0, err
+	}
+	if bytesRead != 8 {
+		return 0, errors.Errorf("read %d bytes, expected 8 bytes", bytesRead)
+	}
+	return binary.LittleEndian.Uint64(buffer), nil
 }
 
 type ScanMemoryOptions struct {

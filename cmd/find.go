@@ -4,13 +4,14 @@ Copyright © 2025 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
-	"github.com/charmbracelet/log"
+	"fmt"
+
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
-	"github.com/saltfishpr/wxdump/internal/core/v2"
+	"github.com/saltfishpr/wxdump/internal/core"
 )
 
 // findCmd represents the find command
@@ -62,15 +63,16 @@ func processFind(processID uint32, target any) error {
 	}
 	defer windows.CloseHandle(handle) //nolint
 
-	offsets, err := core.ScanMemoryWithOptions(handle, target, core.ScanMemoryOptions{
+	addrs, err := core.ScanMemoryWithOptions(handle, target, core.ScanMemoryOptions{
 		ModuleName: "WeChatWin.dll",
 		Limit:      100,
 	})
 	if err != nil {
 		return err
 	}
-	for _, offset := range offsets {
-		log.Infof("0x%X", offset)
-	}
+	hexAddrs := lo.Map(addrs, func(addr uintptr, _ int) string {
+		return fmt.Sprintf("0x%x", addr)
+	})
+	fmt.Println(hexAddrs)
 	return nil
 }
