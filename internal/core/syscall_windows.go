@@ -287,11 +287,11 @@ func DefaultScanMemoryOptions() ScanMemoryOptions {
 	}
 }
 
-func ScanMemory(process windows.Handle, target any) ([]uintptr, error) {
-	return ScanMemoryWithOptions(process, target, DefaultScanMemoryOptions())
+func ScanMemory(process windows.Handle, value any) ([]uintptr, error) {
+	return ScanMemoryWithOptions(process, value, DefaultScanMemoryOptions())
 }
 
-func ScanMemoryWithOptions(process windows.Handle, target any, options ScanMemoryOptions) ([]uintptr, error) {
+func ScanMemoryWithOptions(process windows.Handle, value any, options ScanMemoryOptions) ([]uintptr, error) {
 	if options.Limit <= 0 {
 		return nil, errors.Errorf("limit must be greater than 0")
 	}
@@ -342,7 +342,7 @@ func ScanMemoryWithOptions(process windows.Handle, target any, options ScanMemor
 			break
 		}
 
-		results, err := findInMemory(process, bits, mbi, target)
+		results, err := findInMemory(process, bits, mbi, value)
 		if err != nil {
 			return nil, err
 		}
@@ -359,7 +359,7 @@ func ScanMemoryWithOptions(process windows.Handle, target any, options ScanMemor
 	return res, nil
 }
 
-func findInMemory(process windows.Handle, bits int, mbi windows.MemoryBasicInformation, target any) ([]uintptr, error) {
+func findInMemory(process windows.Handle, bits int, mbi windows.MemoryBasicInformation, value any) ([]uintptr, error) {
 	if mbi.State != windows.MEM_COMMIT {
 		return nil, nil
 	}
@@ -374,13 +374,13 @@ func findInMemory(process windows.Handle, bits int, mbi windows.MemoryBasicInfor
 	if err != nil {
 		return nil, err
 	}
-	return find(bits, buf[:bytesRead], target)
+	return find(bits, buf[:bytesRead], value)
 }
 
-func find(bits int, buf []byte, target any) ([]uintptr, error) {
+func find(bits int, buf []byte, value any) ([]uintptr, error) {
 	var pattern []byte
 
-	switch v := target.(type) {
+	switch v := value.(type) {
 	case int:
 		switch bits {
 		case 64:
@@ -403,7 +403,7 @@ func find(bits int, buf []byte, target any) ([]uintptr, error) {
 	case []byte:
 		pattern = v
 	default:
-		return nil, errors.Errorf("unsupported type: %T", target)
+		return nil, errors.Errorf("unsupported type: %T", value)
 	}
 
 	patternLen := len(pattern)

@@ -11,7 +11,31 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-func GetWeChatInfo(process windows.Handle, offset *WeChatOffset) (*WeChatInfo, error) {
+func GetWeChatVersion(processID uint32) (string, error) {
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION, false, processID)
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+	defer windows.CloseHandle(process) //nolint
+
+	execPath, err := GetModuleFileNameEx(process, 0)
+	if err != nil {
+		return "", err
+	}
+	version, err := GetFileVersionInfo(execPath)
+	if err != nil {
+		return "", err
+	}
+	return version, nil
+}
+
+func GetWeChatInfo(processID uint32, offset *WeChatOffset) (*WeChatInfo, error) {
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ, false, processID)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	defer windows.CloseHandle(process) //nolint
+
 	hMod, err := GetModuleByName(process, "WeChatWin.dll")
 	if err != nil {
 		return nil, errors.WithStack(err)

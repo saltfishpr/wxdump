@@ -4,14 +4,10 @@ Copyright © 2025 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
-	"fmt"
-
 	"github.com/pkg/errors"
-	"github.com/samber/lo"
 	"github.com/spf13/cobra"
-	"golang.org/x/sys/windows"
 
-	"github.com/saltfishpr/wxdump/internal/core"
+	"github.com/saltfishpr/wxdump/internal/cmd/find"
 )
 
 // findCmd represents the find command
@@ -34,19 +30,9 @@ var findCmd = &cobra.Command{
 			return errors.Errorf("unsupported type: %s", valueType)
 		}
 
-		processList, err := core.GetProcessList()
-		if err != nil {
-			return err
-		}
-		wechatProcessList := lo.Filter(processList, func(item *core.ProcessEntry, _ int) bool {
-			return item.ExeFile == "WeChat.exe"
+		return find.Run(cmd.Context(), find.Args{
+			Value: target,
 		})
-		for _, wechatProcess := range wechatProcessList {
-			if err := processFind(wechatProcess.ProcessID, target); err != nil {
-				return err
-			}
-		}
-		return nil
 	},
 }
 
@@ -54,25 +40,4 @@ func init() {
 	rootCmd.AddCommand(findCmd)
 
 	findCmd.Flags().StringP("type", "t", "string", "搜索值类型")
-}
-
-func processFind(processID uint32, target any) error {
-	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ, false, processID)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-	defer windows.CloseHandle(handle) //nolint
-
-	addrs, err := core.ScanMemoryWithOptions(handle, target, core.ScanMemoryOptions{
-		ModuleName: "WeChatWin.dll",
-		Limit:      100,
-	})
-	if err != nil {
-		return err
-	}
-	hexAddrs := lo.Map(addrs, func(addr uintptr, _ int) string {
-		return fmt.Sprintf("0x%x", addr)
-	})
-	fmt.Println(hexAddrs)
-	return nil
 }
