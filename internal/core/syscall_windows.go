@@ -234,14 +234,14 @@ func ReadPointerFromMemory(process windows.Handle, address uintptr) (uintptr, er
 	}
 
 	switch bits {
-	case 32:
-		addr, err := ReadInt32FromMemory(process, address)
+	case 64:
+		addr, err := ReadInt64FromMemory(process, address)
 		if err != nil {
 			return 0, err
 		}
 		return uintptr(addr), nil
-	case 64:
-		addr, err := ReadInt64FromMemory(process, address)
+	case 32:
+		addr, err := ReadInt32FromMemory(process, address)
 		if err != nil {
 			return 0, err
 		}
@@ -301,8 +301,14 @@ func ScanMemoryWithOptions(process windows.Handle, target any, options ScanMemor
 		return nil, err
 	}
 
-	var startAddr uintptr
-	var endAddr uintptr = 0x00007FFFFFFFFFFF // 64位地址空间的最大值
+	info := &systemInfo{}
+	if err := GetNativeSystemInfo(info); err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	var startAddr uintptr = info.lpMinimumApplicationAddress
+	var endAddr uintptr = info.lpMaximumApplicationAddress
+
 	if options.ModuleName != "" {
 		hMods, err := EnumProcessModules(process)
 		if err != nil {
@@ -386,12 +392,12 @@ func find(bits int, buf []byte, target any) ([]uintptr, error) {
 		default:
 			return nil, errors.Errorf("unsupported bits: %d", bits)
 		}
-	case int32:
-		pattern = make([]byte, 4)
-		binary.LittleEndian.PutUint32(pattern, uint32(v))
 	case int64:
 		pattern = make([]byte, 8)
 		binary.LittleEndian.PutUint64(pattern, uint64(v))
+	case int32:
+		pattern = make([]byte, 4)
+		binary.LittleEndian.PutUint32(pattern, uint32(v))
 	case string:
 		pattern = []byte(v)
 	case []byte:
