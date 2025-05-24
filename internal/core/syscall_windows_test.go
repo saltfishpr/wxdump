@@ -38,10 +38,7 @@ func TestScanMemory(t *testing.T) {
 	}
 	defer windows.CloseHandle(handle) //nolint
 
-	addrs, err := ScanMemoryWithOptions(handle, "saltfishpr", ScanMemoryOptions{
-		ModuleName: "WeChatWin.dll",
-		Limit:      100,
-	})
+	addrs, err := ScanMemory(handle, "\\Msg\\FTSContact")
 	if err != nil {
 		t.Fatalf("ScanMemory failed: %+v", err)
 	}

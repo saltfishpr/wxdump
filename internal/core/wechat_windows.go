@@ -1,10 +1,14 @@
 package core
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/charmbracelet/log"
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
 	"golang.org/x/sys/windows"
@@ -29,82 +33,20 @@ func GetWeChatVersion(processID uint32) (string, error) {
 	return version, nil
 }
 
-func GetWeChatInfo(processID uint32, offset *WeChatOffset) (*WeChatInfo, error) {
+func ScanWXIDFromMemory(processID uint32) (string, error) {
 	process, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ, false, processID)
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-	defer windows.CloseHandle(process) //nolint
-
-	hMod, err := GetModuleByName(process, "WeChatWin.dll")
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-	baseAddress := uintptr(hMod)
-
-	nickname, err := ReadStringFromMemory(process, baseAddress+uintptr(offset.Nickname), 64)
-	if err != nil {
-		return nil, errors.Wrapf(err, "read nickname failed")
-	}
-
-	account, err := ReadStringFromMemory(process, baseAddress+uintptr(offset.Account), 32)
-	if err != nil {
-		return nil, errors.Wrapf(err, "read account failed")
-	}
-
-	phone, err := ReadStringFromMemory(process, baseAddress+uintptr(offset.Phone), 64)
-	if err != nil {
-		return nil, errors.Wrapf(err, "read phone failed")
-	}
-
-	key, err := ReadKeyFromMemory(process, baseAddress+uintptr(offset.Key))
-	if err != nil {
-		return nil, errors.Wrapf(err, "read key failed")
-	}
-
-	wxID, err := ReadWXIDFromMemory(process)
-	if err != nil {
-		return nil, errors.Wrapf(err, "read wxID failed")
-	}
-
-	wxDir, err := GetWXDirFromReg()
-	if err != nil {
-		return nil, errors.Wrapf(err, "get wxDir failed")
-	}
-	wxIDDir := filepath.Join(wxDir, wxID)
-
-	return &WeChatInfo{
-		Nickname: nickname,
-		Account:  account,
-		Phone:    phone,
-		Key:      key,
-		WXID:     wxID,
-		WXDir:    wxIDDir,
-	}, nil
-}
-
-func ReadKeyFromMemory(process windows.Handle, address uintptr) (string, error) {
-	pointer, err := ReadPointerFromMemory(process, address)
 	if err != nil {
 		return "", errors.WithStack(err)
 	}
+	defer windows.CloseHandle(process) //nolint
 
-	buf := make([]byte, KeySize)
-	bytesRead, err := ReadMemory(process, pointer, buf)
-	if err != nil {
-		return "", err
-	}
-	if bytesRead != KeySize {
-		return "", errors.New("read key failed")
-	}
-
-	return fmt.Sprintf("%x", buf), nil
-}
-
-func ReadWXIDFromMemory(process windows.Handle) (string, error) {
 	addrs, err := ScanMemory(process, "\\Msg\\FTSContact")
 	if err != nil {
 		return "", err
+	}
+
+	if len(addrs) == 0 {
+		return "", errors.New("no wxid found")
 	}
 
 	var ids []string
@@ -167,4 +109,118 @@ func GetWXDirFromReg() (string, error) {
 	}
 
 	return filepath.Join(res, "WeChat Files"), nil
+}
+
+type CrackDatabaseKeyOptions struct {
+	Account string
+}
+
+// CrackDatabaseKey 爆破数据库密钥
+func CrackDatabaseKey(processID uint32, dbFilename string, options CrackDatabaseKeyOptions) (string, error) {
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION|windows.PROCESS_VM_READ, false, processID)
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+	defer windows.CloseHandle(process) //nolint
+
+	info := &systemInfo{}
+	if err := GetNativeSystemInfo(info); err != nil {
+		return "", errors.WithStack(err)
+	}
+
+	bits, err := GetBits(process)
+	if err != nil {
+		return "", err
+	}
+	pSize := uintptr(bits / 8)
+
+	ranges, err := getPossibleAddressRange(process, options)
+	if err != nil {
+		return "", err
+	}
+
+	fileBuf, err := os.ReadFile(dbFilename)
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+
+	for _, r := range ranges {
+		startAddr := r[0]
+		endAddr := r[1]
+
+		// 对齐地址
+		if startAddr%pSize != 0 {
+			startAddr -= startAddr % pSize
+		}
+		if endAddr%pSize != 0 {
+			endAddr += pSize - endAddr%pSize
+		}
+
+		log.Info("scan memory", "start", fmt.Sprintf("0x%x", startAddr), "end", fmt.Sprintf("0x%x", endAddr))
+
+		for addr := startAddr; addr < endAddr; addr += pSize {
+			if addr < info.lpMinimumApplicationAddress || addr > info.lpMaximumApplicationAddress {
+				continue
+			}
+
+			key, err := readKeyFromMemory(process, addr)
+			if err != nil {
+				continue
+			}
+			// 尝试解密数据库
+			if err := DecryptDB(key, bytes.NewBuffer(fileBuf), io.Discard); err != nil {
+				continue
+			}
+			return key, nil
+		}
+	}
+
+	return "", errors.New("key not found")
+}
+
+func getPossibleAddressRange(process windows.Handle, options CrackDatabaseKeyOptions) ([][2]uintptr, error) {
+	if options.Account != "" {
+		addrs, err := ScanMemoryWithOptions(process, options.Account, ScanMemoryOptions{
+			ModuleName: "WeChatWin.dll",
+			Limit:      100,
+		})
+		if err != nil {
+			return nil, err
+		}
+		var res [][2]uintptr
+		for _, addr := range addrs {
+			res = append(res, [2]uintptr{addr - 0x1000, addr + 0x1000}) // TODO: 支持配置
+		}
+		return res, nil
+	}
+
+	hMod, err := GetModuleByName(process, "WeChatWin.dll")
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	modInfo, err := GetModuleInformation(process, hMod)
+	if err != nil {
+		return nil, err
+	}
+	startAddr := uintptr(hMod)
+	endAddr := startAddr + uintptr(modInfo.SizeOfImage)
+	return [][2]uintptr{{startAddr, endAddr}}, nil
+}
+
+func readKeyFromMemory(process windows.Handle, address uintptr) (string, error) {
+	pointer, err := ReadPointerFromMemory(process, address)
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+
+	buf := make([]byte, KeySize)
+	bytesRead, err := ReadMemory(process, pointer, buf)
+	if err != nil {
+		return "", err
+	}
+	if bytesRead != KeySize {
+		return "", errors.New("read key size mismatch")
+	}
+
+	return fmt.Sprintf("%x", buf), nil
 }

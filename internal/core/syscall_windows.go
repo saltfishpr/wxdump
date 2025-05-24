@@ -276,6 +276,8 @@ func ReadInt64FromMemory(process windows.Handle, address uintptr) (uint64, error
 }
 
 type ScanMemoryOptions struct {
+	StartAddr  uintptr
+	EndAddr    uintptr
 	ModuleName string
 	Limit      int
 }
@@ -296,18 +298,32 @@ func ScanMemoryWithOptions(process windows.Handle, value any, options ScanMemory
 		return nil, errors.Errorf("limit must be greater than 0")
 	}
 
-	bits, err := GetBits(process)
-	if err != nil {
-		return nil, err
-	}
-
 	info := &systemInfo{}
 	if err := GetNativeSystemInfo(info); err != nil {
 		return nil, errors.WithStack(err)
 	}
 
-	var startAddr uintptr = info.lpMinimumApplicationAddress
-	var endAddr uintptr = info.lpMaximumApplicationAddress
+	startAddr := info.lpMinimumApplicationAddress
+	endAddr := info.lpMaximumApplicationAddress
+
+	if options.StartAddr != 0 {
+		startAddr = options.StartAddr
+	}
+	if options.EndAddr != 0 {
+		endAddr = options.EndAddr
+	}
+
+	if startAddr < info.lpMinimumApplicationAddress {
+		startAddr = info.lpMinimumApplicationAddress
+	}
+	if endAddr > info.lpMaximumApplicationAddress {
+		endAddr = info.lpMaximumApplicationAddress
+	}
+
+	bits, err := GetBits(process)
+	if err != nil {
+		return nil, err
+	}
 
 	if options.ModuleName != "" {
 		hMods, err := EnumProcessModules(process)
@@ -331,14 +347,15 @@ func ScanMemoryWithOptions(process windows.Handle, value any, options ScanMemory
 		}
 	}
 
+	var addr uintptr = startAddr
 	var res []uintptr
 	for {
-		if startAddr >= endAddr {
+		if addr >= endAddr {
 			break
 		}
 
 		var mbi windows.MemoryBasicInformation
-		if err := windows.VirtualQueryEx(process, startAddr, &mbi, unsafe.Sizeof(mbi)); err != nil {
+		if err := windows.VirtualQueryEx(process, addr, &mbi, unsafe.Sizeof(mbi)); err != nil {
 			break
 		}
 
@@ -353,7 +370,7 @@ func ScanMemoryWithOptions(process windows.Handle, value any, options ScanMemory
 			break
 		}
 
-		startAddr = mbi.BaseAddress + mbi.RegionSize
+		addr = mbi.BaseAddress + mbi.RegionSize
 	}
 
 	return res, nil

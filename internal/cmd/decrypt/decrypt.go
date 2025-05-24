@@ -15,6 +15,7 @@ import (
 
 type Args struct {
 	OutputDir string
+	Account   string
 }
 
 func Run(ctx context.Context, args Args) error {
@@ -26,42 +27,49 @@ func Run(ctx context.Context, args Args) error {
 		return item.ExeFile == "WeChat.exe"
 	})
 
-	offsets, err := core.LoadWeChatOffsets()
-	if err != nil {
-		return err
-	}
-
 	for _, wechatProcess := range wechatProcessList {
 		version, err := core.GetWeChatVersion(wechatProcess.ProcessID)
 		if err != nil {
 			return err
 		}
-		offset, ok := offsets[version]
-		if !ok {
-			return errors.Errorf("version %s not support", version)
+		log.Infof("wechat version: %s", version)
+
+		// TODO 校验version为 3.x.x.x
+
+		wxID, err := core.ScanWXIDFromMemory(wechatProcess.ProcessID)
+		if err != nil {
+			return err
 		}
 
-		if err := run(wechatProcess.ProcessID, args.OutputDir, offset); err != nil {
+		userOutputDir := filepath.Join(args.OutputDir, wxID)
+		if err := ensureDir(userOutputDir); err != nil {
+			return err
+		}
+
+		if err := run(wechatProcess.ProcessID, wxID, userOutputDir, args.Account); err != nil {
 			log.Warn("decrypt failed", "process_id", wechatProcess.ProcessID, "error", err)
 		}
 	}
 	return nil
 }
 
-func run(processID uint32, outputDir string, offset *core.WeChatOffset) error {
-	weChatInfo, err := core.GetWeChatInfo(processID, offset)
+func run(processID uint32, wxID string, outputDir string, account string) error {
+	log.Infof("decrypt for user: %s", wxID)
+
+	wxDir, err := core.GetWXDirFromReg()
+	if err != nil {
+		return err
+	}
+	wxIDDir := filepath.Join(wxDir, wxID)
+
+	keyStr, err := core.CrackDatabaseKey(processID, filepath.Join(wxIDDir, "Msg", "Applet.db"), core.CrackDatabaseKeyOptions{
+		Account: account,
+	})
 	if err != nil {
 		return err
 	}
 
-	log.Infof("decrypt for user: %s", weChatInfo.WXID)
-
-	userOutputDir := filepath.Join(outputDir, weChatInfo.WXID)
-	if err := ensureDir(userOutputDir); err != nil {
-		return err
-	}
-
-	return filepath.WalkDir(weChatInfo.WXDir, func(path string, d fs.DirEntry, err error) error {
+	return filepath.WalkDir(wxIDDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -74,11 +82,28 @@ func run(processID uint32, outputDir string, offset *core.WeChatOffset) error {
 		if filepath.Base(path) == "xInfo.db" {
 			return nil // xInfo.db 不需要解密
 		}
-		if err := core.DecryptDB(weChatInfo.Key, path, filepath.Join(userOutputDir, filepath.Base(path))); err != nil {
+
+		if err := decryptDB(keyStr, path, outputDir); err != nil {
 			log.Warn("decrypt db failed", "filename", path, "error", err)
 		}
 		return nil
 	})
+}
+
+func decryptDB(keyStr string, filename string, outputDir string) error {
+	inputFile, err := os.Open(filename)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	defer inputFile.Close()
+
+	outputFile, err := os.Create(filepath.Join(outputDir, filepath.Base(filename)))
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	defer outputFile.Close()
+
+	return core.DecryptDB(keyStr, inputFile, outputFile)
 }
 
 func ensureDir(path string) error {
